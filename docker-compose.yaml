@@ -5,10 +5,12 @@ services:
             dockerfile: Dockerfile
         stdin_open: true
         tty: true
+        entrypoint: pnpm start --characters="$CHARACTERS"
         volumes:
             - /var/run/tappd.sock:/var/run/tappd.sock
             - tee:/app/packages/client-twitter/src/tweetcache
             - tee:/app/db.sqlite
+            - ./characters:/app/characters
         environment:
             - OPENAI_API_KEY=
             - REDPILL_API_KEY=
