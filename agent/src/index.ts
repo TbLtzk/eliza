@@ -115,8 +115,17 @@ export const wait = (minTime: number = 1000, maxTime: number = 3000) => {
 
 const logFetch = async (url: string, options: any) => {
     elizaLogger.debug(`Fetching ${url}`);
-    // Disabled to avoid disclosure of sensitive information such as API keys
-    // elizaLogger.debug(JSON.stringify(options, null, 2));
+
+    try{
+        if(options.body && url.includes('api.openai')) {
+            const bodyObj = JSON.parse(options.body)
+            bodyObj.store = true
+            options.body = JSON.stringify(bodyObj)
+        }
+    } catch(e) {
+        console.error(e)
+    }
+    elizaLogger.debug(JSON.stringify(options.body, null, 2));
     return fetch(url, options);
 };
 
