@@ -12,6 +12,7 @@ import {
   encryptStringValue,
   getSalt,
   encryptObjectValues,
+  parseKeyValueXml,
 } from '@elizaos/core';
 import express from 'express';
 import fs from 'node:fs';
@@ -19,6 +20,7 @@ import { Readable } from 'node:stream';
 import type { AgentServer } from '..';
 import { upload } from '../loader';
 import { convertToAudioBuffer } from '@/src/utils/audioBuffer';
+import { uuid } from '@electric-sql/pglite';
 
 /**
  * Interface representing a custom request object that extends the express.Request interface.
@@ -1230,11 +1232,13 @@ export function agentRouter(
       return;
     }
 
+    logger.log('[/:agentId/message] processing message (body):', req.body);
+
     const entityId = req.body.entityId;
     const roomId = req.body.roomId;
 
     const source = req.body.source;
-    const text = req.body.text.trim();
+    const text = req.body.text?.trim();
 
     const channelType = req.body.channelType;
 
@@ -1275,12 +1279,45 @@ export function agentRouter(
         state,
         template: messageHandlerTemplate,
       });
+      logger.log('[/:agentId/message] Prompt:', prompt);
 
-      const response = await runtime.useModel(ModelType.OBJECT_LARGE, {
-        prompt,
-      });
+      // Retry if missing required fields
+      let responseContent: Content | null = null;
+      let retries = 0;
+      const maxRetries = 3;
 
-      if (!response) {
+      while (retries < maxRetries && (!responseContent?.thought || !responseContent?.actions)) {
+        // Use TEXT_LARGE model as we expect structured XML text, not a JSON object
+        let response = await runtime.useModel(ModelType.TEXT_LARGE, {
+          prompt,
+        });
+
+        logger.debug('*** Raw LLM Response ***\n', response);
+
+        // Attempt to parse the XML response
+        const parsedXml = parseKeyValueXml(response);
+        logger.debug('*** Parsed XML Content ***\n', parsedXml);
+
+        // Map parsed XML to Content type, handling potential missing fields
+        if (parsedXml) {
+          responseContent = {
+            thought: parsedXml.thought || '',
+            actions: parsedXml.actions || ['REPLY'],
+            providers: parsedXml.providers || [],
+            text: parsedXml.text || '',
+            simple: parsedXml.simple || false,
+          };
+        } else {
+          responseContent = null;
+        }
+
+        retries++;
+        if (!responseContent?.thought || !responseContent?.actions) {
+          logger.warn('*** Missing required fields (thought or actions), retrying... ***');
+        }
+      }
+
+      if (!responseContent) {
         res.status(500).json({
           success: false,
           error: {
@@ -1290,16 +1327,22 @@ export function agentRouter(
         });
         return;
       }
+      responseContent.inReplyTo = createUniqueUuid(runtime, messageId);
+      logger.log('[/:agentId/message] Response content:', responseContent);
 
-      const responseMessage: Memory = {
-        id: createUniqueUuid(runtime, messageId),
+      const responseMessage = {
+        id: uuid() as UUID,
         ...userMessage,
         entityId: runtime.agentId,
-        content: response,
+        content: responseContent,
         createdAt: Date.now(),
       };
 
       const replyHandler = async (message: Content) => {
+        logger.log(
+          '[/:agentId/message] forward agent reply to caller:',
+          JSON.stringify(message, null, 4)
+        );
         res.status(201).json({
           success: true,
           data: {
@@ -1313,6 +1356,7 @@ export function agentRouter(
         return [memory];
       };
 
+      logger.log('[/:agentId/message] Processing actions: ', responseMessage.content.actions);
       await runtime.processActions(memory, [responseMessage], state, replyHandler);
 
       await runtime.evaluate(memory, state);
